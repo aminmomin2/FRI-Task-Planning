@@ -4,7 +4,7 @@ from google.genai import types
 
 def generate():
     client = genai.Client(
-        api_key="AIzaSyDbZKle0m91csH1Gq4h5h2RigQkqsC0lxs"
+        api_key=""
     )
 
     model = "gemini-2.5-pro-exp-03-25"
