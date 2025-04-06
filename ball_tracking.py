@@ -1,111 +1,133 @@
 from collections import deque
 from imutils.video import VideoStream
+from centroid_tracker import CentroidTracker
 import numpy as np
 import argparse
 import cv2
 import imutils
 import time
+import random
 
-# construct the argument parse and parse the arguments
+# Argument parsing
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video",
-    help="path to the (optional) video file")
-ap.add_argument("-b", "--buffer", type=int, default=64,
-    help="max buffer size")
+ap.add_argument("-v", "--video", help="path to optional video file")
+ap.add_argument("-b", "--buffer", type=int, default=64, help="max trail length")
 args = vars(ap.parse_args())
 
-# define the lower and upper boundaries of the "green"
-# ball in the HSV color space, then initialize the
-# list of tracked points
+# HSV range for green tennis balls
 greenLower = (29, 86, 6)
 greenUpper = (64, 255, 255)
-pts = deque(maxlen=args["buffer"])
-initial_center = None
-movement_threshold = 20
 
-# if a video path was not supplied, grab the reference
-# to the webcam
+# Tracker and state dictionaries
+ct = CentroidTracker(maxDisappeared=30)
+trail_dict = {}            # ID -> deque of points
+color_dict = {}            # ID -> outline color
+fill_color_dict = {}       # ID -> unique fill color
+initial_centroids = {}     # ID -> initial (x, y)
+movement_threshold = 20    # pixels
+
+# Video input
 if not args.get("video", False):
-	vs = VideoStream(src=0).start()
-
-# otherwise, grab a reference to the video file
+    vs = VideoStream(src=0).start()
 else:
-	vs = cv2.VideoCapture(args["video"])
-# allow the camera or video file to warm up
+    vs = cv2.VideoCapture(args["video"])
+
 time.sleep(2.0)
 
-# keep looping
 while True:
-	# grab the current frame
-	frame = vs.read()
-	# handle the frame from VideoCapture or VideoStream
-	frame = frame[1] if args.get("video", False) else frame
-	# if we are viewing a video and we did not grab a frame,
-	# then we have reached the end of the video
-	if frame is None:
-		break
-	# resize the frame, blur it, and convert it to the HSV
-	# color space
-	frame = imutils.resize(frame, width=600)
-	blurred = cv2.GaussianBlur(frame, (11, 11), 0)
-	hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-	# construct a mask for the color "green", then perform
-	# a series of dilations and erosions to remove any small
-	# blobs left in the mask
-	mask = cv2.inRange(hsv, greenLower, greenUpper)
-	mask = cv2.erode(mask, None, iterations=2)
-	mask = cv2.dilate(mask, None, iterations=2)
-	# find contours in the mask and initialize the current
-	# (x, y) center of the ball
-	cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL,
-		cv2.CHAIN_APPROX_SIMPLE)
-	cnts = imutils.grab_contours(cnts)
-	center = None
-	# only proceed if at least one contour was found
-	if len(cnts) > 0:
-		# find the largest contour
-		c = max(cnts, key=cv2.contourArea)
-		((x, y), radius) = cv2.minEnclosingCircle(c)
-		M = cv2.moments(c)
-		center = (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
+    frame = vs.read()
+    frame = frame[1] if args.get("video", False) else frame
+    if frame is None:
+        break
 
-		if radius > 10:
-			if initial_center is None:
-				initial_center = center
+    # Preprocessing
+    frame = imutils.resize(frame, width=600)
+    blurred = cv2.GaussianBlur(frame, (11, 11), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
-			# calculate movement distance
-			dx = center[0] - initial_center[0]
-			dy = center[1] - initial_center[1]
-			distance = np.sqrt(dx * dx + dy * dy)
+    # Masking
+    mask = cv2.inRange(hsv, greenLower, greenUpper)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, None, iterations=2)
+    mask = cv2.erode(mask, None, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=2)
 
-			# choose color based on movement
-			if distance > movement_threshold:
-				cv2.circle(frame, (int(x), int(y)), int(radius), (255, 0, 0), -1)  # Filled blue
-			else:
-				cv2.circle(frame, (int(x), int(y)), int(radius), (0, 255, 255), 2)  # Yellow outline
-	# update the points queue
-	pts.appendleft(center)
-	# loop over the set of tracked points
-	for i in range(1, len(pts)):
-		# if either of the tracked points are None, ignore
-		# them
-		if pts[i - 1] is None or pts[i] is None:
-			continue
-		# otherwise, compute the thickness of the line and
-		# draw the connecting lines
-		thickness = int(np.sqrt(args["buffer"] / float(i + 1)) * 2.5)
-		cv2.line(frame, pts[i - 1], pts[i], (0, 0, 255), thickness)
-	# show the frame to our screen
-	cv2.imshow("Frame", frame)
-	key = cv2.waitKey(1) & 0xFF
-	# if the 'q' key is pressed, stop the loop
-	if key == ord("q"):
-		break
-# if we are not using a video file, stop the camera video stream
+    # Find contours
+    cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+    inputCentroids = []
+    contour_centroid_map = {}
+
+    for c in cnts:
+        if cv2.contourArea(c) < 150:
+            continue
+
+        ((x, y), radius) = cv2.minEnclosingCircle(c)
+        if radius > 10:
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            inputCentroids.append((cX, cY))
+            contour_centroid_map[(cX, cY)] = (c, (x, y), radius)
+
+    # Update tracker
+    objects = ct.update(inputCentroids)
+
+    for objectID, centroid in objects.items():
+        cX, cY = centroid
+        trail = trail_dict.setdefault(objectID, deque(maxlen=args["buffer"]))
+        outline_color = color_dict.setdefault(objectID, tuple(random.choices(range(100, 256), k=3)))
+
+        # Assign a different fill color
+        if objectID not in fill_color_dict:
+            while True:
+                fill_color = tuple(random.choices(range(50, 256), k=3))
+                if fill_color != outline_color:
+                    break
+            fill_color_dict[objectID] = fill_color
+
+        fill_color = fill_color_dict[objectID]
+        initial_centroid = initial_centroids.setdefault(objectID, centroid)
+
+        # Calculate movement distance
+        dx = cX - initial_centroid[0]
+        dy = cY - initial_centroid[1]
+        distance = np.sqrt(dx**2 + dy**2)
+
+        # Draw outline and fill (if moved)
+        if centroid in contour_centroid_map:
+            _, (x, y), radius = contour_centroid_map[centroid]
+            center = (int(x), int(y))
+            radius = int(radius)
+
+            # Always draw outline
+            cv2.circle(frame, center, radius, outline_color, 3)
+
+            # Fill if moved
+            if distance > movement_threshold:
+                cv2.circle(frame, center, radius - 3, fill_color, -1)
+
+        # Label
+        cv2.putText(frame, f"ID {objectID}", (cX - 10, cY - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, outline_color, 2)
+
+        # Trail
+        trail.appendleft(centroid)
+        for i in range(1, len(trail)):
+            if trail[i - 1] is None or trail[i] is None:
+                continue
+            thickness = int(np.sqrt(args["buffer"] / float(i + 1)) * 2.5)
+            cv2.line(frame, trail[i - 1], trail[i], outline_color, thickness)
+
+    cv2.imshow("Multi-Ball Tracker", frame)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord("q"):
+        break
+
+# Cleanup
 if not args.get("video", False):
-	vs.stop()
-# otherwise, release the camera
+    vs.stop()
 else:
-	vs.release()
-# close all windows
+    vs.release()
 cv2.destroyAllWindows()
