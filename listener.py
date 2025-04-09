@@ -1,6 +1,5 @@
-from dataclasses import fields
 import rospy
-from sensor_msg.msg import Image, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 import sensor_msgs.point_cloud2 as pc2
 import std_msgs.msg
@@ -55,6 +54,7 @@ def publish_point_cloud(points, header):
 def depth_callback(msg):
     global rgb_image, camera_model
     if camera_model is None or rgb_image is None:
+        rospy.logwarn_throttle(1, "Waiting for RGB image and camera info...")
         return
 
     try:
