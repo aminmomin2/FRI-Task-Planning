@@ -61,4 +61,3 @@ class CentroidTracker:
                     self.register(inputCentroids[col])
 
         return self.objects
-    
